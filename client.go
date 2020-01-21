@@ -2,128 +2,156 @@ package shef
 
 import (
 	"encoding/json"
+	"errors"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"time"
 )
 
-type Receiver struct {
-	ip   string
-	port int
-}
-
-func (r *Receiver) Address() string {
-	return r.ip + ":" + string(r.port)
-}
+const (
+	NoMinor = 65535
+)
 
 const (
 	protocol         = "http://"
 	getTuned         = "/tv/getTuned"
-	getProgInfo      = "/tv/getProgInfo"
+	getProgramInfo   = "/tv/getProgInfo"
 	tune             = "/tv/tune"
 	remoteProcessKey = "/remote/processKey"
 	getVersion       = "/info/getVersion"
 	getOptions       = "/info/getOptions"
-	mode             = "/info/mode"
+	getMode          = "/info/getMode"
 	getLocations     = "/info/getLocations"
 )
 
 type Client struct {
 	client   *http.Client
-	receiver Receiver
+	receiver *Receiver
 }
 
-type Status struct {
-	Code          int    `json:"code"`
-	CommandResult int    `json:"commandResult"`
-	Msg           string `json:"msg"`
-	Query         string `json:"query"`
-}
-
-type ParentalControlStatus int
-
-const (
-	PCInvalid ParentalControlStatus = iota
-	Locked
-	TemporarilyUnlocked
-	Unlocked
-)
-
-type RecordingType int
-
-const (
-	RTInvalid RecordingType = iota
-	Manual
-	FindBy
-	Regular
-	Recurring
-)
-
-type GetTunedResponse struct {
-	StationID     int                   `json:"stationId"`
-	ProgramID     int                   `json:"programId"`
-	MaterialID    int                   `json:"materialId"`
-	StartTime     int64                 `json:"startTime"`
-	Duration      int                   `json:"duration"`
-	Major         int                   `json:"major"`
-	Minor         int                   `json:"minor"`
-	CallSign      string                `json:"callsign"`
-	IsOffAir      bool                  `json:"isOffAir"`
-	IsVOD         bool                  `json:"isVod"`
-	IsPPV         bool                  `json:"isPpv"`
-	IsPurchased   bool                  `json:"isPurchased"`
-	IsRecording   bool                  `json:"isRecording"`
-	Rating        string                `json:"rating"`
-	IsPCLocked    ParentalControlStatus `json:"isPclocked"`
-	Date          string                `json:"date"`
-	Title         string                `json:"title"`
-	EpisodeTitle  string                `json:"episodeTitle"`
-	UniqueID      string                `json:"uniqueId"`
-	KeepUntilFull bool                  `json:"keepUntilFull"`
-	IsViewed      bool                  `json:"isViewed"`
-	Expiration    string                `json:"expiration"`
-	ExpiryTime    int64                 `json:"expiryTime"`
-	RecordingType RecordingType         `json:"recordingType"`
-	FindByWord    string                `json:"findByWord"`
-	IsPartial     bool                  `json:"isPartial"`
-	Priority      string                `json:"priority"`
-	Offset        string                `json:"offset"`
-	Music         struct {
-		Artist string `json:"by"`
-		Album  string `json:"cd"`
-		Title  string `json:"title"`
+// NewClient returns a |*Client|. If a nil *http.Client is passed,
+// the |*Client| uses an |http.DefaultClient|.
+func NewClient(c *http.Client, r *Receiver) *Client {
+	if c == nil {
+		c = http.DefaultClient
 	}
-	Status `json:"status"`
+	return &Client{
+		client:   c,
+		receiver: r,
+	}
 }
 
+// GetTuned returns a |*GetTunedResponse| or an error on error.
 func (c *Client) GetTuned() (*GetTunedResponse, error) {
-	var resp, err = c.client.Get(protocol + c.receiver.Address() + getTuned)
+	var gtr = &GetTunedResponse{}
+	var err = c.get(getTuned, "", gtr)
+
+	return gtr, err
+}
+
+// GetProgramInfoMajor re
+func (c *Client) GetProgramInfoMajor(major int) (*GetTunedResponse, error) {
+	return c.GetProgramInfoAtTime(major, NoMinor, nil)
+}
+
+func (c *Client) GetProgramInfo(major, minor int) (*GetTunedResponse, error) {
+	return c.GetProgramInfoAtTime(major, minor, nil)
+}
+
+func (c *Client) GetProgramInfoAtTime(major, minor int, time *time.Time) (*GetTunedResponse, error) {
+	var q = make(url.Values)
+	q.Add("major", string(major))
+	q.Add("minor", string(minor))
+	if time != nil {
+		q.Add("time", string(time.Unix()))
+	}
+
+	var gtr = &GetTunedResponse{}
+	var err = c.get(getProgramInfo, q.Encode(), gtr)
+
+	return gtr, err
+}
+
+func (c *Client) TuneMajor(major int) (*Status, error) {
+	return c.Tune(major, NoMinor)
+}
+
+func (c *Client) Tune(major, minor int) (*Status, error) {
+	var q = make(url.Values)
+	q.Add("major", string(major))
+	q.Add("minor", string(minor))
+
+	var s = &Status{}
+	var err = c.get(tune, q.Encode(), s)
+
+	return s, err
+}
+
+func (c *Client) Press(k key, a keyAction) (*KeyResponse, error) {
+	var q = make(url.Values)
+	q.Add("key", string(k))
+	q.Add("hold", string(a))
+
+	var kr = &KeyResponse{}
+	var err = c.get(remoteProcessKey, q.Encode(), kr)
+
+	return kr, err
+}
+
+func (c *Client) GetVersion() (*VersionResponse, error) {
+	var v = &VersionResponse{}
+	var err = c.get(getVersion, "", v)
+
+	return v, err
+}
+
+func (c *Client) GetMode() (*ModeResponse, error) {
+	var m = &ModeResponse{}
+	var err = c.get(getMode, "", m)
+
+	return m, err
+}
+
+func (c *Client) GetLocations() (*LocationResponse, error) {
+	var lr = &LocationResponse{}
+	var err = c.get(getLocations, "", lr)
+
+	return lr, err
+}
+
+var (
+	ErrNotModified        = errors.New("not modified")
+	ErrConflict           = errors.New("conflict")
+	ErrServiceUnavailable = errors.New("service unavailable")
+)
+
+func (c *Client) get(path, query string, s interface{}) error {
+	var resp, err = c.client.Get(protocol + c.receiver.Address() + path + "?" + query)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// No-op.
+	case http.StatusNotModified:
+		return ErrNotModified
+	case http.StatusBadRequest, http.StatusForbidden:
+		return errors.New("bad / forbidden request")
+	case http.StatusConflict:
+		return ErrConflict
+	case http.StatusInternalServerError, http.StatusHTTPVersionNotSupported:
+		return errors.New("unfulfillable request")
+	case http.StatusServiceUnavailable:
+		return ErrServiceUnavailable
 	}
 
 	var b []byte
 	b, err = ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var gtr = &GetTunedResponse{}
-	err = json.Unmarshal(b, gtr)
-
-	return gtr, err
+	return json.Unmarshal(b, s)
 }
-
-type InfoOpts struct {
-	Minor      int
-	Time       time.Time
-	ClientAddr string
-}
-
-func (c *Client) GetProgramInfo(major int) (*GetTunedResponse, error) {
-
-}
-
-var (
-	c *Client
-)
